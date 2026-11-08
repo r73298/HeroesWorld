@@ -15066,6 +15066,178 @@ if not REQUIRE_GAME_ID or game.PlaceId == GAME_ID then
     })
 
 
+    -- ====== GameBug (collapsible) ======
+    -- Auto Close NPC Dialog. The quest NPC (Smile) talks in TWO steps inside PlayerGui.HUD.Frames.Chat:
+    --   1) "These criminals are too much for me!"  (no buttons, waits for a tap)
+    --   2) "Please help me take them out!"          (Yes / No)
+    -- This taps through step 1 with real input, waits for the Yes/No buttons to finish sliding in, then presses
+    -- "No" with real input. It never presses Yes and never fires the button signals, so the quest is never taken.
+    -- If the dialog is still open afterwards it closes it the way the game does (the CloseChat event).
+    -- Small "GameBug" notifications show each step, so you can see where it stops if something does not work.
+    FTab:CreateSection("GameBug")
+    getgenv().AutoCloseDialogOnlySmile = true
+    FTab:CreateToggle({
+        Name = "Auto Close NPC Dialog",
+        CurrentValue = false,
+        Flag = "AutoCloseDialog",
+        Callback = function(Value)
+            getgenv().AutoCloseDialogGen = (getgenv().AutoCloseDialogGen or 0) + 1
+            local gen = getgenv().AutoCloseDialogGen
+            if not Value then return end
+
+            local Players = game:GetService("Players")
+            local GuiService = game:GetService("GuiService")
+            local VIM = game:GetService("VirtualInputManager")
+            local pg = Players.LocalPlayer:WaitForChild("PlayerGui")
+            local function clean(t) return (tostring(t):lower():gsub("[^%w]", "")) end
+            local function note(t) pcall(function() Library.Notify("info", "GameBug", t) end) end
+
+            local function chatFrame()
+                local hud = pg:FindFirstChild("HUD")
+                local fr = hud and hud:FindFirstChild("Frames")
+                return fr and fr:FindFirstChild("Chat")
+            end
+            -- the chat is open (and it is Smile talking, if "Only Smile" is on)
+            local function activeChat()
+                local chat = chatFrame()
+                if not (chat and chat.Visible) then return end
+                if getgenv().AutoCloseDialogOnlySmile then
+                    local cn = chat:FindFirstChild("CharacterName")
+                    if not (cn and clean(cn.Text) == "smile") then return end
+                end
+                return chat
+            end
+            -- the Yes / No question is showing: returns the No button and the Yes button
+            local function findNo(chat)
+                local opts = chat:FindFirstChild("Options")
+                if not (opts and opts.Visible) then return end
+                local yes, no
+                for _, b in ipairs(opts:GetChildren()) do
+                    if b:IsA("GuiButton") and b.Visible and b.AbsoluteSize.X > 0 then
+                        local t = clean(b.Text)
+                        if t == "yes" then yes = b elseif t == "no" then no = b end
+                    end
+                end
+                if yes and no then return no, yes end
+            end
+
+            local function insetOf(obj)
+                local sg = obj:FindFirstAncestorOfClass("ScreenGui")
+                return (sg and sg.IgnoreGuiInset) and Vector2.zero or GuiService:GetGuiInset()
+            end
+            local function touchAt(x, y)
+                pcall(function()
+                    VIM:SendTouchEvent(11, 0, x, y)
+                    task.wait(0.06)
+                    VIM:SendTouchEvent(11, 1, x, y)
+                    task.wait(0.06)
+                    VIM:SendTouchEvent(11, 2, x, y)
+                end)
+            end
+            local function mouseAt(x, y)
+                pcall(function()
+                    VIM:SendMouseMoveEvent(x, y, game)
+                    task.wait(0.05)
+                    VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                    task.wait(0.1)
+                    VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+                end)
+            end
+            -- tap the middle of a GUI object (re-read every time, because the buttons slide)
+            local function tapObj(obj, useMouse, offset)
+                local c = obj.AbsolutePosition + obj.AbsoluteSize / 2 + offset
+                if useMouse then mouseAt(c.X, c.Y) else touchAt(c.X, c.Y) end
+            end
+
+            local function closeChatLikeGame()
+                pcall(function()
+                    local ev = game:GetService("ReplicatedStorage").Package.Events:FindFirstChild("CloseChat")
+                    if ev then ev:Fire() end
+                end)
+            end
+
+            -- presses No (real input) until the Yes/No question goes away
+            local function pressNo(chat, no, yes)
+                local offs = { insetOf(no), Vector2.zero, GuiService:GetGuiInset() }
+                local function gone()
+                    local o = chat:FindFirstChild("Options")
+                    return not (chat.Visible and o and o.Visible and no.Parent and no.Visible and no.AbsoluteSize.X > 0)
+                end
+                local function overYes(off)
+                    local c = no.AbsolutePosition + no.AbsoluteSize / 2 + off
+                    local yp, ys = yes.AbsolutePosition + off, yes.AbsoluteSize
+                    return c.X >= yp.X and c.X <= yp.X + ys.X and c.Y >= yp.Y and c.Y <= yp.Y + ys.Y
+                end
+                for _, useMouse in ipairs({ false, true }) do
+                    for _, off in ipairs(offs) do
+                        if gone() then return true end
+                        if not overYes(off) then
+                            tapObj(no, useMouse, off)
+                            task.wait(0.5)
+                            if gone() then return true end
+                        end
+                    end
+                end
+                return gone()
+            end
+
+            note("Auto Close NPC Dialog on")
+            task.spawn(function()
+                local handled, advanceTaps, lastKey, stable = false, 0, nil, 0
+                while getgenv().AutoCloseDialogGen == gen do
+                    local ok, chat = pcall(activeChat)
+                    if not (ok and chat) then
+                        handled, advanceTaps, lastKey, stable = false, 0, nil, 0
+                    elseif not handled then
+                        local okf, no, yes = pcall(findNo, chat)
+                        if okf and no then
+                            -- step 2: wait until the buttons stop sliding (the game ignores clicks before that)
+                            local key = tostring(no.AbsoluteSize.X) .. "x" .. tostring(no.AbsoluteSize.Y)
+                            if key == lastKey then stable = stable + 1 else stable, lastKey = 0, key end
+                            if stable >= 3 then
+                                handled = true
+                                note("Pressing No")
+                                local pressed = false
+                                local okp = pcall(function() pressed = pressNo(chat, no, yes) end)
+                                task.wait(0.7)
+                                if chat.Visible then
+                                    -- the goodbye line waits for a tap: give it one like a player would
+                                    tapObj(chat, false, insetOf(chat))
+                                    task.wait(0.8)
+                                end
+                                if chat.Visible then
+                                    note("Closing chat the game's way")
+                                    closeChatLikeGame()
+                                elseif okp and pressed then
+                                    note("Closed")
+                                end
+                            end
+                        else
+                            -- step 1 (typing, or waiting for a tap): tap the chat to skip / continue
+                            lastKey, stable = nil, 0
+                            if advanceTaps < 8 then
+                                advanceTaps = advanceTaps + 1
+                                if advanceTaps == 1 then note("Skipping first line") end
+                                tapObj(chat, advanceTaps % 3 == 0, insetOf(chat))
+                                task.wait(0.6)
+                            end
+                        end
+                    end
+                    task.wait(0.15)
+                end
+                note("Auto Close NPC Dialog off")
+            end)
+        end,
+    })
+    FTab:CreateToggle({
+        Name = "Only Smile (quest NPC)",
+        CurrentValue = true,
+        Flag = "AutoCloseDialogOnlySmile",
+        Callback = function(Value)
+            getgenv().AutoCloseDialogOnlySmile = Value
+        end,
+    })
+
     -- StartPlay: presses the PLAY button on the lobby screen with real input
     local function startPlay(quiet)
         local Players = game:GetService("Players")
@@ -16488,6 +16660,760 @@ if not REQUIRE_GAME_ID or game.PlaceId == GAME_ID then
     LTab:CreateButton({
         Name = "Sell now",
         Callback = function() task.spawn(runSell, not lb.live) end,
+    })
+
+    -- ================= UI: Quirk Spin =================
+    -- Auto Quirk Spin for the quirk spin screen (PlayerGui.QuirkSpin.Quirk). Everything is pressed with REAL input
+    -- (finger tap, then mouse click as backup): the spin-type button, Spin, and the Yes / No of the rarity warning.
+    -- It never calls the QuirkSpin remote itself, so the game's own rolling scene always runs.
+    --   * Spin to use: Common / Rare / Epic / Legendary / Mythical (uses your spins of that type)
+    --   * Quirks to KEEP: pick as many as you like. When you own one of them (or just rolled it) it stops, and if
+    --     the "you are about to spin off a Legendary/Mythical quirk" warning is up it presses No (Cancel).
+    --   * Any other quirk: if the warning comes up it presses Yes and keeps spinning.
+    --   * Stops by itself when the spins run out. Open the Quirk Spin screen first, then turn it on.
+    LTab:CreateSection("Quirk Spin")
+    local GuiService = game:GetService("GuiService")
+    local QS_FILE = "Hyze/quirkspin_" .. tostring(game.PlaceId) .. ".json"
+    local QS_SPINS = { "Common", "Rare", "Epic", "Legendary", "Mythical" }
+    local QS_RARITY_ORDER = { "Mythical", "Legendary", "Epic", "Rare", "Common" }
+    local QS_QUIRKS = {
+        Common = { "Quirkless", "Ice", "Invisibility", "Shock Absorption", "Super Regeneration", "Super Strength" },
+        Rare = { "Engine", "Zero Gravity", "Air Cannon" },
+        Epic = { "Explosion", "Dark Shadow", "Phoenix", "Permeation", "Electrification", "Super Voice" },
+        Legendary = { "Hell Flame", "Half-Hot Half-Cold", "Cremation", "Fierce Wings", "Overhaul", "Decay2", "Crimson Mimic" },
+        Mythical = { "Everything is mine", "One For All" },
+    }
+    local qsOptions, qsLookup = {}, {}
+    for _, rar in ipairs(QS_RARITY_ORDER) do
+        for _, q in ipairs(QS_QUIRKS[rar]) do
+            local label = q .. " (" .. rar .. ")"
+            qsOptions[#qsOptions + 1] = label
+            qsLookup[label] = q
+        end
+    end
+    local qsKeep = {} -- label -> true
+    pcall(function()
+        if type(isfile) == "function" and isfile(QS_FILE) then
+            local t = HttpService:JSONDecode(readfile(QS_FILE))
+            if type(t) == "table" then
+                for _, label in ipairs(t) do
+                    if qsLookup[label] then qsKeep[label] = true end
+                end
+            end
+        end
+    end)
+    local function qsSave()
+        pcall(function()
+            if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("Hyze") then makefolder("Hyze") end
+            local list = {}
+            for label in pairs(qsKeep) do list[#list + 1] = label end
+            table.sort(list)
+            writefile(QS_FILE, HttpService:JSONEncode(list))
+        end)
+    end
+    local function qsKeepSet()
+        local s, n = {}, 0
+        for label in pairs(qsKeep) do
+            local q = qsLookup[label]
+            if q then s[q] = true; n = n + 1 end
+        end
+        return s, n
+    end
+
+    local function qsClean(t) return (tostring(t):lower():gsub("[^%w]", "")) end
+    local qsDisplayFn
+    pcall(function() qsDisplayFn = require(RS:WaitForChild("Package", 5):WaitForChild("DisplayNames", 5)) end)
+    local function qsDisplay(name)
+        local d
+        if qsDisplayFn then pcall(function() d = qsDisplayFn("Quirks", name) end) end
+        return tostring(d or name)
+    end
+    local function qsData()
+        local d
+        pcall(function() d = RS:WaitForChild("Datas", 5):WaitForChild(tostring(LocalPlayer.UserId), 5) end)
+        return d
+    end
+    local function qsCount(data, spinType)
+        local v = data:FindFirstChild(spinType .. "Spins")
+        return v and tonumber(v.Value) or 0
+    end
+    local function qsShown(obj)
+        local o = obj
+        while o and o ~= PlayerGui do
+            if o:IsA("GuiObject") and not o.Visible then return false end
+            if o:IsA("LayerCollector") and not o.Enabled then return false end
+            o = o.Parent
+        end
+        return obj ~= nil and obj.AbsoluteSize.X > 4 and obj.AbsoluteSize.Y > 4
+    end
+    -- the quirk you own (or, after a spin, the one on the screen) is one of the KEEP quirks: returns its name
+    local function qsMatched(data, fr, keepSet, checkLabel)
+        local q = data:FindFirstChild("Quirk")
+        local val = q and q.Value
+        if val and keepSet[val] then return val end
+        if checkLabel and fr then
+            local lab = fr:FindFirstChild("Quirk")
+            local txt = (lab and lab:IsA("TextLabel")) and qsClean(lab.Text) or ""
+            if txt ~= "" then
+                for name in pairs(keepSet) do
+                    if qsClean(qsDisplay(name)) == txt then return name end
+                end
+            end
+        end
+        return nil
+    end
+
+    -- good places to press on a button: points where the button itself is the top GUI object (so nothing covers it)
+    local function qsPointsFor(obj)
+        local p, s = obj.AbsolutePosition, obj.AbsoluteSize
+        local fracs = { { 0.5, 0.5 }, { 0.3, 0.5 }, { 0.7, 0.5 }, { 0.5, 0.3 }, { 0.5, 0.7 } }
+        local good, all = {}, {}
+        for _, f in ipairs(fracs) do
+            local pt = Vector2.new(p.X + s.X * f[1], p.Y + s.Y * f[2])
+            all[#all + 1] = pt
+            local okh, hits = pcall(function() return PlayerGui:GetGuiObjectsAtPosition(pt.X, pt.Y) end)
+            if okh and type(hits) == "table" and hits[1] and (hits[1] == obj or hits[1]:IsDescendantOf(obj)) then
+                good[#good + 1] = pt
+            end
+        end
+        if #good > 0 then return good end
+        return all
+    end
+    -- for the log: what the button is and what is on top of it
+    local function qsDescribe(obj)
+        local c = obj.AbsolutePosition + obj.AbsoluteSize / 2
+        local names = {}
+        pcall(function()
+            for i, h in ipairs(PlayerGui:GetGuiObjectsAtPosition(c.X, c.Y)) do
+                if i > 5 then break end
+                names[#names + 1] = h:GetFullName():gsub("^.-PlayerGui%.", "")
+            end
+        end)
+        llog(("quirk spin: could not press %s (%s) pos=%d,%d size=%dx%d top objects: %s"):format(
+            obj.Name, obj.ClassName, c.X, c.Y, obj.AbsoluteSize.X, obj.AbsoluteSize.Y, table.concat(names, " | ")))
+    end
+
+    -- real press: finger tap first, then mouse click; stops as soon as evidence() says it worked.
+    -- allowSignal (only for the spin-TYPE tabs, which just switch a local label): last resort fires the button's
+    -- own click. The Spin button and the warning are never pressed that way.
+    local function qsClick(obj, evidence, patience, allowSignal)
+        if not (obj and VIM) then return false end
+        local sg = obj:FindFirstAncestorOfClass("ScreenGui")
+        local inset = GuiService:GetGuiInset()
+        local first = (sg and sg.IgnoreGuiInset) and Vector2.zero or inset
+        local offs, seen = {}, {}
+        for _, o in ipairs({ first, Vector2.zero, inset }) do
+            local k = o.X .. "," .. o.Y
+            if not seen[k] then seen[k] = true; offs[#offs + 1] = o end
+        end
+        local function settle()
+            local t0 = tick()
+            while tick() - t0 < (patience or 1.5) do
+                if evidence() then return true end
+                task.wait(0.1)
+            end
+            return evidence() and true or false
+        end
+        for _, useMouse in ipairs({ false, true }) do
+            for _, off in ipairs(offs) do
+                local pts = qsPointsFor(obj) -- read fresh: things slide / tween
+                for i = 1, math.min(#pts, 2) do
+                    if evidence() then return true, "real" end
+                    if not (obj.Parent and obj.AbsoluteSize.X > 0) then return false end
+                    local c = pts[i] + off
+                    if useMouse then
+                        pcall(function()
+                            VIM:SendMouseMoveEvent(c.X, c.Y, game)
+                            task.wait(0.05)
+                            VIM:SendMouseButtonEvent(c.X, c.Y, 0, true, game, 0)
+                            task.wait(0.1)
+                            VIM:SendMouseButtonEvent(c.X, c.Y, 0, false, game, 0)
+                        end)
+                    else
+                        pcall(function()
+                            VIM:SendTouchEvent(13, 0, c.X, c.Y)
+                            task.wait(0.06)
+                            VIM:SendTouchEvent(13, 1, c.X, c.Y)
+                            task.wait(0.06)
+                            VIM:SendTouchEvent(13, 2, c.X, c.Y)
+                        end)
+                    end
+                    if settle() then return true, "real" end
+                end
+            end
+        end
+        if allowSignal then
+            if type(firesignal) == "function" then
+                pcall(function() firesignal(obj.MouseButton1Click) end)
+                if settle() then return true, "signal" end
+            end
+            if type(getconnections) == "function" then
+                pcall(function()
+                    for _, c in ipairs(getconnections(obj.MouseButton1Click)) do
+                        pcall(function() c:Fire() end)
+                    end
+                end)
+                if settle() then return true, "signal" end
+            end
+        end
+        qsDescribe(obj)
+        return false
+    end
+
+    -- ===== go to the Doctor (workspace.NPCs.Doctor.TriggerChat) and open the spin screen the real way =====
+    -- walk (or hover) into the TriggerChat part -> "Tap to talk to Doctor" shows -> tap the world -> press the options
+    -- that lead to the Reroll action (found by reading the Doctor's chat values) -> the game opens the spin screen.
+    local qsRunService = game:GetService("RunService")
+    local qsPathfinding = game:GetService("PathfindingService")
+    local QS_DOCTOR_FILE = "Hyze/quirkspin_doctor_" .. tostring(game.PlaceId) .. ".json"
+    local qsDoctorPos -- remembered, because far-away NPCs can be streamed out of the world
+    pcall(function()
+        if type(isfile) == "function" and isfile(QS_DOCTOR_FILE) then
+            local t = HttpService:JSONDecode(readfile(QS_DOCTOR_FILE))
+            if type(t) == "table" and t.x then qsDoctorPos = Vector3.new(t.x, t.y, t.z) end
+        end
+    end)
+    local function qsFindDoctor()
+        local npcs = workspace:FindFirstChild("NPCs")
+        local doc = npcs and npcs:FindFirstChild("Doctor")
+        local trig = doc and doc:FindFirstChild("TriggerChat")
+        if trig and trig:IsA("BasePart") then
+            local pos = trig.Position
+            if not qsDoctorPos or (qsDoctorPos - pos).Magnitude > 1 then
+                qsDoctorPos = pos
+                pcall(function()
+                    if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("Hyze") then makefolder("Hyze") end
+                    writefile(QS_DOCTOR_FILE, HttpService:JSONEncode({ x = pos.X, y = pos.Y, z = pos.Z }))
+                end)
+            end
+        end
+        return doc, trig
+    end
+    -- the options to press, in order, to reach the Reroll action (read from the Doctor's chat values)
+    local function qsRerollPath(npc)
+        local root = npc:FindFirstChild("Chat")
+        if not root then return nil end
+        local target
+        for _, d in ipairs(root:GetDescendants()) do
+            if d.Name == "Action" and d:IsA("ValueBase") and tostring(d.Value) == "Reroll" then target = d break end
+        end
+        if not target then return nil end
+        local path, p = {}, target.Parent
+        while p and p ~= root do
+            if p.Name:sub(1, 6) == "Option" then table.insert(path, 1, p.Name) end
+            p = p.Parent
+        end
+        return path
+    end
+    local function qsHudFrame(name)
+        local hud = PlayerGui:FindFirstChild("HUD")
+        local frames = hud and hud:FindFirstChild("Frames")
+        return frames and frames:FindFirstChild(name)
+    end
+    -- the game shows "Tap to talk to <npc>" while you stand in the TriggerChat part
+    local function qsAtDoctor()
+        local ok, res = pcall(function()
+            local nt = qsHudFrame("Notification")
+            local p = nt and nt:FindFirstChild("NPC")
+            return p and p.Visible and tostring(p.Text):lower():find("doctor", 1, true) ~= nil
+        end)
+        return ok and res == true
+    end
+    local function qsTapAt(x, y, useMouse)
+        if not VIM then return end
+        if useMouse then
+            pcall(function()
+                VIM:SendMouseMoveEvent(x, y, game)
+                task.wait(0.05)
+                VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.1)
+                VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+        else
+            pcall(function()
+                VIM:SendTouchEvent(14, 0, x, y)
+                task.wait(0.06)
+                VIM:SendTouchEvent(14, 1, x, y)
+                task.wait(0.06)
+                VIM:SendTouchEvent(14, 2, x, y)
+            end)
+        end
+    end
+    -- a spot on the screen with no GUI on top, so the tap reaches the world (the game ignores taps on GUI)
+    local function qsFreeSpot()
+        local cam = workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+        local inset = GuiService:GetGuiInset()
+        local spots = { { 0.5, 0.18 }, { 0.35, 0.25 }, { 0.65, 0.25 }, { 0.5, 0.35 }, { 0.25, 0.4 }, { 0.75, 0.4 }, { 0.5, 0.5 } }
+        for _, f in ipairs(spots) do
+            local x, y = vp.X * f[1], vp.Y * f[2]
+            local clear = true
+            for _, dy in ipairs({ 0, -inset.Y }) do
+                local okh, hits = pcall(function() return PlayerGui:GetGuiObjectsAtPosition(x, y + dy) end)
+                if okh and type(hits) == "table" and #hits > 0 then clear = false end
+            end
+            if clear then return x, y end
+        end
+        return vp.X * spots[1][1], vp.Y * spots[1][2]
+    end
+    local function qsChatShown(chat)
+        return chat ~= nil and chat.Visible and qsShown(chat)
+    end
+    local function qsUiOpen()
+        local sg = PlayerGui:FindFirstChild("QuirkSpin")
+        local fr = sg and sg:FindFirstChild("Quirk")
+        return fr ~= nil and qsShown(fr) and fr.AbsoluteSize.X > 100
+    end
+
+    -- walk (pathfinding) or hover (noclip) into the Doctor's TriggerChat part. returns ok, cleanup, reason
+    local function qsTravel(alive)
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not (hum and hrp and hum.Health > 0) then return false, nil, "Your character is not ready" end
+        local function goal()
+            local _, trig = qsFindDoctor()
+            return trig and trig.Position or qsDoctorPos
+        end
+        if not goal() then return false, nil, "Doctor not found (go near him once so he loads, then try again)" end
+        local hold, conn
+        local function cleanup()
+            if conn then conn:Disconnect() conn = nil end
+            if hold then pcall(function() hold:Destroy() end) hold = nil end
+        end
+        local function hover(timeout)
+            hold = Instance.new("BodyVelocity")
+            hold.Name = "HyzeHold"
+            hold.Velocity = Vector3.new(0, 0, 0)
+            hold.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            hold.Parent = hrp
+            conn = qsRunService.Stepped:Connect(function()
+                for _, d in ipairs(char:GetDescendants()) do
+                    if d:IsA("BasePart") then d.CanCollide = false end
+                end
+            end)
+            local t0 = tick()
+            while alive() and tick() - t0 < timeout do
+                if qsAtDoctor() then return true end
+                local g = goal()
+                if not g then return false end
+                local delta = g - hrp.Position
+                if delta.Magnitude < 1.5 then
+                    task.wait(0.3)
+                    return qsAtDoctor()
+                end
+                hrp.CFrame = hrp.CFrame + delta.Unit * math.min(delta.Magnitude, 8) -- 80 studs per second
+                task.wait(0.1)
+            end
+            return qsAtDoctor()
+        end
+        local function walk(timeout)
+            local t0, lastPos, lastCheck, stuckFor = tick(), hrp.Position, tick(), 0
+            local wps, wi, pathFor, computing, nextPath = nil, 1, nil, false, 0
+            while alive() and tick() - t0 < timeout do
+                if qsAtDoctor() then hum:MoveTo(hrp.Position) return true end
+                local g = goal()
+                if not g then return false end
+                if tick() - lastCheck > 1.2 then
+                    if (hrp.Position - lastPos).Magnitude < 1.5 then
+                        stuckFor = stuckFor + 1.2
+                        hum.Jump = true
+                    else
+                        stuckFor = 0
+                    end
+                    lastPos, lastCheck = hrp.Position, tick()
+                    if stuckFor >= 2.4 then wps = nil end
+                    if stuckFor >= 7 then return false end -- stuck: the caller hovers instead
+                end
+                if (not wps or (pathFor and (pathFor - g).Magnitude > 10)) and not computing and tick() > nextPath then
+                    computing, nextPath = true, tick() + 1.5
+                    local from = hrp.Position
+                    task.spawn(function()
+                        local okp, path = pcall(function()
+                            local p = qsPathfinding:CreatePath({ AgentRadius = 2, AgentHeight = 5, AgentCanJump = true })
+                            p:ComputeAsync(from, g)
+                            return p
+                        end)
+                        computing = false
+                        if okp and path and path.Status == Enum.PathStatus.Success then
+                            wps, wi, pathFor = path:GetWaypoints(), 2, g
+                        else
+                            wps = nil
+                        end
+                    end)
+                end
+                local wp = wps and wps[wi]
+                if wp and Vector3.new(wp.Position.X - hrp.Position.X, 0, wp.Position.Z - hrp.Position.Z).Magnitude < 3.5 then
+                    wi = wi + 1
+                    wp = wps[wi]
+                end
+                if wp then
+                    if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+                    hum:MoveTo(wp.Position)
+                else
+                    hum:MoveTo(g)
+                end
+                task.wait(0.1)
+            end
+            return qsAtDoctor()
+        end
+        local ok
+        if (getgenv().QuirkSpinTravel or "Walk") == "Hover" then
+            ok = hover(40)
+        else
+            ok = walk(45)
+            if not ok and alive() then
+                note("info", "Quirk Spin", "Walking got stuck, hovering instead")
+                ok = hover(40)
+            end
+        end
+        if not ok then
+            cleanup()
+            return false, nil, "Could not reach the Doctor"
+        end
+        return true, cleanup
+    end
+
+    -- the whole trip: travel, talk, press the Reroll option. returns true when the spin screen is open
+    local function qsOpenSpin(alive)
+        if qsUiOpen() then return true end
+        local arrived, cleanup, why = qsTravel(alive)
+        if not arrived then
+            llog("quirk spin: " .. tostring(why))
+            note("warning", "Quirk Spin", tostring(why))
+            return false
+        end
+        local doctor = qsFindDoctor()
+        local path = doctor and qsRerollPath(doctor)
+        if not path then
+            -- no Reroll option found in his chat: open the screen the way the Reroll option does (client event)
+            llog("quirk spin: no Reroll option found in the Doctor's chat, firing Quirky")
+            pcall(function() RS:WaitForChild("Package", 3):WaitForChild("Events", 3):WaitForChild("Quirky", 3):Fire() end)
+        end
+        local idx, lastTap, tapN, stable, lastKey = 1, 0, 0, 0, nil
+        local deadline, opened = tick() + 45, false
+        while alive() and tick() < deadline do
+            if qsUiOpen() then opened = true break end
+            local chat = qsHudFrame("Chat")
+            local opts = chat and chat:FindFirstChild("Options")
+            if chat and qsChatShown(chat) then
+                if opts and opts.Visible and path and path[idx] then
+                    local btn = opts:FindFirstChild(path[idx])
+                    if btn and btn:IsA("GuiButton") and btn.Visible and btn.AbsoluteSize.X > 0 then
+                        local key = tostring(btn.AbsoluteSize.X)
+                        if key == lastKey then stable = stable + 1 else stable, lastKey = 0, key end
+                        if stable >= 3 then -- the buttons slide in; the game ignores presses until they stop
+                            local okc = qsClick(btn, function()
+                                return qsUiOpen() or not (opts.Visible and btn.Visible and btn.AbsoluteSize.X > 0)
+                            end, 2.0)
+                            if okc then idx = idx + 1; stable, lastKey = 0, nil end
+                        end
+                    end
+                elseif not (opts and opts.Visible) then
+                    -- text only: tap the chat to skip / continue
+                    if tick() - lastTap > 0.9 then
+                        lastTap = tick()
+                        tapN = tapN + 1
+                        local sg = chat:FindFirstAncestorOfClass("ScreenGui")
+                        local off = (sg and sg.IgnoreGuiInset) and Vector2.zero or GuiService:GetGuiInset()
+                        local c = chat.AbsolutePosition + chat.AbsoluteSize / 2 + off
+                        qsTapAt(c.X, c.Y, tapN % 3 == 0)
+                    end
+                end
+            elseif qsAtDoctor() then
+                -- in the trigger, not talking yet: tap the world
+                if tick() - lastTap > 1.2 then
+                    lastTap = tick()
+                    tapN = tapN + 1
+                    local x, y = qsFreeSpot()
+                    qsTapAt(x, y, tapN % 3 == 0)
+                end
+            end
+            task.wait(0.15)
+        end
+        if cleanup then cleanup() end
+        if not opened and alive() then
+            llog("quirk spin: the spin screen did not open")
+            note("warning", "Quirk Spin", "The spin screen did not open")
+        end
+        return opened
+    end
+
+    -- closes the spin screen like a player would (Complete, or the X). The game then fires DoneSpin itself.
+    local function qsCloseShop(sg, fr, complete, topClose)
+        local function closed() return not qsShown(fr) end
+        local btn = (complete and complete.Visible) and complete or topClose
+        local ok = false
+        if btn then ok = qsClick(btn, closed, 2.5) end
+        if not ok and not closed() then
+            -- last resort: the same things the game does when you press Complete
+            if _G.SpawnQuirkRoll ~= true then
+                pcall(function() RS:WaitForChild("Package", 3):WaitForChild("Events", 3):WaitForChild("DoneSpin", 3):FireServer() end)
+            end
+            pcall(function() RS.Package.Events.CloseChat:Fire() end)
+            pcall(function() fr.Visible = false end)
+            pcall(function() sg.Enabled = false end)
+        end
+    end
+
+    local function qsMain(gen)
+        local function alive() return getgenv().QuirkSpinGen == gen end
+        local function stop(kind, text)
+            if alive() then
+                note(kind, "Quirk Spin", text)
+                llog("quirk spin: " .. text)
+            end
+        end
+        local data = qsData()
+        if not data then stop("warning", "Could not read your data") return end
+        local rolled, lastClick, fails, lastSeen, openTries = false, 0, 0, tick(), 0
+        do
+            local _, n0 = qsKeepSet()
+            note("info", "Quirk Spin", "Using " .. tostring(getgenv().QuirkSpinType or "Common") .. " spins, keeping " .. n0 .. " quirk(s)")
+        end
+
+        local function step()
+            local sg = PlayerGui:FindFirstChild("QuirkSpin")
+            local fr = sg and sg:FindFirstChild("Quirk")
+            local want = getgenv().QuirkSpinType or "Common"
+            local keepSet, keepN = qsKeepSet()
+            if keepN == 0 then stop("warning", "Pick at least one quirk to KEEP first") return true end
+            if not (fr and qsShown(fr) and fr.AbsoluteSize.X > 100) then
+                -- the spin screen is closed
+                local own = qsMatched(data, nil, keepSet, false)
+                if own then stop("success", "You already have " .. qsDisplay(own)) return true end
+                if getgenv().QuirkSpinStay then
+                    if tick() - lastSeen > 15 then
+                        stop("warning", "Open the Quirk Spin screen first (or turn off 'Stay here')")
+                        return true
+                    end
+                    task.wait(0.5)
+                    return false
+                end
+                if qsCount(data, want) <= 0 then stop("warning", "No " .. want .. " spins left") return true end
+                openTries = openTries + 1
+                if openTries > 3 then stop("error", "Could not open the spin screen at the Doctor") return true end
+                note("info", "Quirk Spin", "Going to the Doctor (try " .. openTries .. " of 3)")
+                qsOpenSpin(alive)
+                if not alive() then return true end
+                task.wait(0.5)
+                return false
+            end
+            lastSeen = tick()
+
+            local spinBtn = fr:FindFirstChild("Spin")
+            local complete = fr:FindFirstChild("Complete")
+            local warnF = fr:FindFirstChild("RarityWarning")
+            local decision = fr:FindFirstChild("Decision")
+            local buy = sg:FindFirstChild("BuyScreen")
+            local spinsFrame = fr:FindFirstChild("SpinsFrame")
+            local top = fr:FindFirstChild("Top")
+            local topClose = top and top:FindFirstChild("Close")
+            if not (spinBtn and complete and warnF and spinsFrame) then
+                stop("error", "The Quirk Spin screen looks different than expected")
+                return true
+            end
+            if (buy and buy.Visible) or (decision and decision.Visible) then
+                task.wait(0.5)
+                return false
+            end
+
+            -- already own / just rolled a quirk you want to keep: stop (and answer a warning with No)
+            local hit = qsMatched(data, fr, keepSet, rolled)
+            if hit then
+                if warnF.Visible then
+                    qsClick(warnF:FindFirstChild("Cancel"), function() return not warnF.Visible end, 1.5)
+                end
+                if not getgenv().QuirkSpinKeepOpen then
+                    qsCloseShop(sg, fr, complete, topClose)
+                end
+                stop("success", "Got " .. qsDisplay(hit) .. (getgenv().QuirkSpinKeepOpen and " (spin screen left open)" or ", spin screen closed"))
+                return true
+            end
+
+            -- which spin type is selected right now (the selected button shows its "Out" frame)
+            local sel
+            for _, n in ipairs(QS_SPINS) do
+                local b = spinsFrame:FindFirstChild(n)
+                local o = b and b:FindFirstChild("Out")
+                if o and o.Visible then sel = n end
+            end
+            if sel ~= want then
+                if warnF.Visible then
+                    qsClick(warnF:FindFirstChild("Cancel"), function() return not warnF.Visible end, 1.5)
+                    return false
+                end
+                local b = spinsFrame:FindFirstChild(want)
+                local o = b and b:FindFirstChild("Out")
+                if not (b and o) then stop("error", "No " .. want .. " button on the screen") return true end
+                local okSel, how = qsClick(b, function() return o.Visible end, 1.0, true)
+                if not okSel then
+                    stop("error", "Could not select the " .. want .. " spins (details in Hyze/lobby_log.txt)")
+                    return true
+                end
+                note("info", "Quirk Spin", "Selected " .. want .. " spins (" .. tostring(how) .. ")")
+                task.wait(0.3)
+                return false
+            end
+
+            local before = qsCount(data, want)
+            if before <= 0 then
+                if warnF.Visible then
+                    qsClick(warnF:FindFirstChild("Cancel"), function() return not warnF.Visible end, 1.5)
+                end
+                stop("warning", "No " .. want .. " spins left")
+                return true
+            end
+
+            -- the game ignores a second press for a few seconds (shorter with the super spin)
+            local gap = LocalPlayer:GetAttribute("SuperSpin") and 0.7 or 5.3
+            local more = gap - (tick() - lastClick)
+            if more > 0 then
+                task.wait(more)
+                if not alive() then return true end
+            end
+
+            local function answerWarning()
+                -- the warning is about spinning off a Legendary / Mythical quirk that is NOT on your keep list: Yes
+                local again = qsMatched(data, fr, keepSet, rolled)
+                if again then
+                    qsClick(warnF:FindFirstChild("Cancel"), function() return not warnF.Visible end, 1.5)
+                    stop("success", "Keeping " .. qsDisplay(again))
+                    return true
+                end
+                lastClick = tick()
+                local yes = warnF:FindFirstChild("Complete")
+                -- may need a retry or two: the game can ignore the first press for a moment
+                if not qsClick(yes, function() return not warnF.Visible end, 2.2) then
+                    stop("error", "Could not press Yes on the warning")
+                    return true
+                end
+                return false
+            end
+
+            local function afterSpin()
+                -- 1) wait until the server has taken the spin
+                local t0 = tick()
+                while alive() and tick() - t0 < 4 and qsCount(data, want) >= before and not (buy and buy.Visible) do
+                    task.wait(0.1)
+                end
+                if buy and buy.Visible then
+                    local c = buy:FindFirstChild("Close")
+                    if c then qsClick(c, function() return not buy.Visible end, 1.5) end
+                    stop("warning", "No " .. want .. " spins left")
+                    return true
+                end
+                if qsCount(data, want) >= before then
+                    fails = fails + 1
+                    if fails >= 3 then stop("error", "The spin did not start") return true end
+                    return false
+                end
+                fails = 0
+                -- 2) the rolling scene: Complete hides, then shows again when it is over
+                local t1 = tick()
+                while alive() and tick() - t1 < 2 and complete.Visible do task.wait(0.05) end
+                local t2 = tick()
+                while alive() and tick() - t2 < 25 do
+                    if complete.Visible and (not topClose or topClose.Visible) and not warnF.Visible then
+                        rolled = true
+                        openTries = 0
+                        task.wait(0.4)
+                        return false
+                    end
+                    task.wait(0.1)
+                end
+                stop("warning", "The spin screen did not finish")
+                return true
+            end
+
+            if warnF.Visible then
+                -- a warning is already up
+                if answerWarning() then return true end
+                return afterSpin()
+            end
+
+            lastClick = tick()
+            local function evidence()
+                return qsCount(data, want) < before or warnF.Visible or (buy and buy.Visible)
+            end
+            if not qsClick(spinBtn, evidence, 2.5) then
+                fails = fails + 1
+                if fails >= 3 then stop("error", "The Spin button did not react") return true end
+                return false
+            end
+            if warnF.Visible and qsCount(data, want) >= before then
+                if answerWarning() then return true end
+            end
+            return afterSpin()
+        end
+
+        local errs = 0
+        while alive() do
+            local ok, res = pcall(step)
+            if not ok then
+                errs = errs + 1
+                llog("quirk spin error: " .. tostring(res))
+                if errs >= 5 then stop("error", "Stopped after errors (see Hyze/lobby_log.txt)") return end
+                task.wait(1)
+            else
+                errs = 0
+                if res then return end
+                task.wait(0.15)
+            end
+        end
+    end
+
+    getgenv().QuirkSpinType = getgenv().QuirkSpinType or "Common"
+    LTab:CreateLabel("Turn off Auto Mob / Multi Farm first. If the spin screen is closed it goes to the Doctor, opens it, spins with real touch, and closes it when you get a KEEP quirk (says No to the warning for those).")
+    LTab:CreateDropdown({
+        Name = "Spin to use",
+        Options = QS_SPINS,
+        CurrentOption = "Common",
+        Callback = function(Value)
+            getgenv().QuirkSpinType = Value
+        end,
+    })
+    LTab:CreateMultiDropdown({
+        Name = "Quirks to KEEP",
+        Options = qsOptions,
+        GetSet = function() return qsKeep end,
+        Callback = function(label)
+            if qsKeep[label] then qsKeep[label] = nil else qsKeep[label] = true end
+            qsSave()
+        end,
+    })
+    getgenv().QuirkSpinTravel = getgenv().QuirkSpinTravel or "Walk"
+    LTab:CreateDropdown({
+        Name = "Go to the Doctor by",
+        Options = { "Walk", "Hover" },
+        CurrentOption = "Walk",
+        Callback = function(Value)
+            getgenv().QuirkSpinTravel = Value
+        end,
+    })
+    LTab:CreateToggle({
+        Name = "Stay here (do not go to the Doctor)",
+        CurrentValue = false,
+        Callback = function(Value)
+            getgenv().QuirkSpinStay = Value
+        end,
+    })
+    LTab:CreateToggle({
+        Name = "Leave the spin screen open when done",
+        CurrentValue = false,
+        Callback = function(Value)
+            getgenv().QuirkSpinKeepOpen = Value
+        end,
+    })
+    LTab:CreateToggle({
+        Name = "Auto Quirk Spin",
+        CurrentValue = false,
+        Callback = function(Value)
+            getgenv().QuirkSpinGen = (getgenv().QuirkSpinGen or 0) + 1
+            local gen = getgenv().QuirkSpinGen
+            if not Value then return end
+            task.spawn(qsMain, gen)
+        end,
     })
 
     -- ================= UI: Farm Equips =================
