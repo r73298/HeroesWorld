@@ -12149,7 +12149,9 @@ if not REQUIRE_GAME_ID or game.PlaceId == GAME_ID then
         if type(name) ~= "string" then return nil end
         local low = name:lower()
         for n, list in pairs(SAVE_POINTS) do
-            if low == n:lower() or low:find(n:lower(), 1, true) then return list end
+            -- EXACT name only. (It used to also match any name that merely CONTAINS the saved name, so "Nemunion",
+            -- a normal mob, got the world boss "Nemu"'s save points and kept flying back to them.)
+            if low == n:lower() then return list end
         end
         return nil
     end
@@ -15075,7 +15077,63 @@ if not REQUIRE_GAME_ID or game.PlaceId == GAME_ID then
     -- If the dialog is still open afterwards it closes it the way the game does (the CloseChat event).
     -- Small "GameBug" notifications show each step, so you can see where it stops if something does not work.
     FTab:CreateSection("GameBug")
-    getgenv().AutoCloseDialogOnlySmile = true
+    getgenv().AutoCloseDialogAll = false
+
+    -- ===== AutoClose debug logger =====
+    -- Everything Auto Close NPC Dialog sees and does is logged: Hyze/autoclose_log.txt (and Hyze/debug.txt),
+    -- kept in memory too. Use "Copy AutoClose log" below to put it on your clipboard, or turn on
+    -- "AutoClose log on screen" to see the last lines live (good for screenshots).
+    do
+        local A = { lines = {}, overlay = false, label = nil }
+        getgenv().HyzeAC = A
+        local function refreshOverlay()
+            if not A.overlay then
+                if A.label and A.label.Parent then pcall(function() A.label.Parent:Destroy() end) end
+                A.label = nil
+                return
+            end
+            if not (A.label and A.label.Parent) then
+                local g = Instance.new("ScreenGui")
+                g.Name, g.ResetOnSpawn, g.DisplayOrder, g.IgnoreGuiInset = "HyzeACDebug", false, 9998, true
+                local ok = type(gethui) == "function" and pcall(function() g.Parent = gethui() end)
+                if not ok then pcall(function() g.Parent = game:GetService("CoreGui") end) end
+                if not g.Parent then g.Parent = game.Players.LocalPlayer:WaitForChild("PlayerGui") end
+                local t = Instance.new("TextLabel")
+                t.Size, t.Position = UDim2.new(0.42, 0, 0, 190), UDim2.new(0, 8, 0, 190)
+                t.BackgroundColor3, t.BackgroundTransparency = Color3.new(0, 0, 0), 0.3
+                t.TextColor3, t.TextXAlignment, t.TextYAlignment = Color3.fromRGB(150, 255, 170), Enum.TextXAlignment.Left, Enum.TextYAlignment.Top
+                t.TextSize, t.Font, t.TextWrapped, t.Active = 10, Enum.Font.Code, true, false
+                t.Parent = g
+                A.label = t
+            end
+        end
+        A.refresh = refreshOverlay
+        function A.log(msg)
+            local line = string.format("[%.2f] %s", tick() % 10000, tostring(msg))
+            local n = #A.lines + 1
+            A.lines[n] = line
+            if n > 600 then table.remove(A.lines, 1) end
+            pcall(function()
+                if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("Hyze") then makefolder("Hyze") end
+                if type(appendfile) == "function" then
+                    appendfile("Hyze/autoclose_log.txt", line .. "\n")
+                elseif type(writefile) == "function" then
+                    writefile("Hyze/autoclose_log.txt", table.concat(A.lines, "\n"))
+                end
+            end)
+            if type(dlog) == "function" then pcall(dlog, "AC: " .. tostring(msg)) end
+            if A.overlay then
+                pcall(function()
+                    refreshOverlay()
+                    if A.label then
+                        local from = math.max(1, #A.lines - 13)
+                        A.label.Text = table.concat(A.lines, "\n", from, #A.lines)
+                    end
+                end)
+            end
+        end
+    end
+
     FTab:CreateToggle({
         Name = "Auto Close NPC Dialog",
         CurrentValue = false,
@@ -15083,80 +15141,161 @@ if not REQUIRE_GAME_ID or game.PlaceId == GAME_ID then
         Callback = function(Value)
             getgenv().AutoCloseDialogGen = (getgenv().AutoCloseDialogGen or 0) + 1
             local gen = getgenv().AutoCloseDialogGen
-            if not Value then return end
+            local function L(t)
+                local A = getgenv().HyzeAC
+                if A then pcall(A.log, t) end
+            end
+            if not Value then
+                L("==== toggle OFF ====")
+                return
+            end
 
             local Players = game:GetService("Players")
             local GuiService = game:GetService("GuiService")
+            local UIS = game:GetService("UserInputService")
             local VIM = game:GetService("VirtualInputManager")
             local pg = Players.LocalPlayer:WaitForChild("PlayerGui")
             local function clean(t) return (tostring(t):lower():gsub("[^%w]", "")) end
-            local function note(t) pcall(function() Library.Notify("info", "GameBug", t) end) end
+            local function note(t)
+                L("NOTE: " .. t)
+                pcall(function() Library.Notify("info", "GameBug", t) end)
+            end
+            local function has(obj, name)
+                local ok, v = pcall(function() return obj[name] end)
+                return ok and v ~= nil
+            end
+
+            L("==== Auto Close NPC Dialog ON (gen " .. gen .. ") ====")
+            L(string.format("env: TouchEnabled=%s MouseEnabled=%s KeyboardEnabled=%s GamepadEnabled=%s",
+                tostring(UIS.TouchEnabled), tostring(UIS.MouseEnabled), tostring(UIS.KeyboardEnabled), tostring(UIS.GamepadEnabled)))
+            L(string.format("funcs: SendTouchEvent=%s SendMouseButtonEvent=%s SendKeyEvent=%s firesignal=%s getconnections=%s appendfile=%s setclipboard=%s",
+                tostring(has(VIM, "SendTouchEvent")), tostring(has(VIM, "SendMouseButtonEvent")), tostring(has(VIM, "SendKeyEvent")),
+                tostring(type(firesignal) == "function"), tostring(type(getconnections) == "function"),
+                tostring(type(appendfile) == "function"), tostring(type(setclipboard) == "function" or type(toclipboard) == "function")))
+            pcall(function()
+                local cam = workspace.CurrentCamera
+                L("viewport=" .. tostring(cam and cam.ViewportSize) .. " guiInset=" .. tostring(GuiService:GetGuiInset())
+                    .. " 'Also close other NPCs'=" .. tostring(getgenv().AutoCloseDialogAll))
+            end)
 
             local function chatFrame()
                 local hud = pg:FindFirstChild("HUD")
                 local fr = hud and hud:FindFirstChild("Frames")
                 return fr and fr:FindFirstChild("Chat")
             end
-            -- the chat is open (and it is Smile talking, if "Only Smile" is on)
+            -- the chat is open (and it is Smile talking, if "Only Smile" is on). 3rd result = why not.
             local function activeChat()
                 local chat = chatFrame()
-                if not (chat and chat.Visible) then return end
-                if getgenv().AutoCloseDialogOnlySmile then
-                    local cn = chat:FindFirstChild("CharacterName")
-                    if not (cn and clean(cn.Text) == "smile") then return end
+                if not chat then return nil, nil, "HUD.Frames.Chat not found" end
+                if not chat.Visible then return nil, nil, "chat hidden (no dialogue open)" end
+                local cn = chat:FindFirstChild("CharacterName")
+                local who = cn and clean(cn.Text) or ""
+                local isSmile = who == "smile"
+                if not (isSmile or getgenv().AutoCloseDialogAll) then
+                    return nil, nil, "IGNORED: '" .. who .. "' is not Smile and 'Also close other NPCs' is OFF"
                 end
-                return chat
+                -- with "other NPCs" on it also skips their lines (Agent John etc.), but never the Doctor's
+                return chat, isSmile or who ~= "doctor", nil
             end
             -- the Yes / No question is showing: returns the No button and the Yes button
             local function findNo(chat)
                 local opts = chat:FindFirstChild("Options")
                 if not (opts and opts.Visible) then return end
+                -- only the "No" button matters. "yes" = whatever OTHER choice is showing (Yes, "I have the items", ...),
+                -- it is only used to make sure a tap never lands on it. It is never pressed.
                 local yes, no
                 for _, b in ipairs(opts:GetChildren()) do
                     if b:IsA("GuiButton") and b.Visible and b.AbsoluteSize.X > 0 then
                         local t = clean(b.Text)
-                        if t == "yes" then yes = b elseif t == "no" then no = b end
+                        if t == "no" then no = b elseif not yes then yes = b end
                     end
                 end
-                if yes and no then return no, yes end
+                if no then return no, yes end
+            end
+            -- one-line picture of the whole chat box: returns the full text and a key that ignores the typing text
+            local function snapshot(chat)
+                local cn = chat:FindFirstChild("CharacterName")
+                local tx = chat:FindFirstChild("Text")
+                local opts = chat:FindFirstChild("Options")
+                local txt = tx and tx.Text or ""
+                local btn = {}
+                if opts then
+                    for _, b in ipairs(opts:GetChildren()) do
+                        if b:IsA("GuiButton") then
+                            local okT, tt = pcall(function() return b.Text end)
+                            btn[#btn + 1] = string.format("%s[%s vis=%s %dx%d]", b.Name, okT and tostring(tt) or "?", tostring(b.Visible), b.AbsoluteSize.X, b.AbsoluteSize.Y)
+                        end
+                    end
+                end
+                local who = cn and cn.Text or "?"
+                local ov = opts and tostring(opts.Visible) or "none"
+                local b = table.concat(btn, ", ")
+                local short = (txt:sub(1, 50):gsub("\n", " "))
+                local full = string.format('who="%s" text(%d)="%s" Options.Visible=%s buttons={%s}', who, #txt, short, ov, b)
+                return full, who .. "|" .. ov .. "|" .. b, txt
             end
 
             local function insetOf(obj)
                 local sg = obj:FindFirstAncestorOfClass("ScreenGui")
                 return (sg and sg.IgnoreGuiInset) and Vector2.zero or GuiService:GetGuiInset()
             end
+            local lastSend, lastSendKind = 0, "-"
+            local touchId = 40
             local function touchAt(x, y)
-                pcall(function()
-                    VIM:SendTouchEvent(11, 0, x, y)
-                    task.wait(0.06)
-                    VIM:SendTouchEvent(11, 1, x, y)
-                    task.wait(0.06)
-                    VIM:SendTouchEvent(11, 2, x, y)
-                end)
+                touchId = touchId + 1
+                if touchId > 90 then touchId = 41 end
+                local id = touchId
+                lastSend, lastSendKind = tick(), "touch#" .. id
+                local ok1, e1 = pcall(function() VIM:SendTouchEvent(id, 0, x, y) end)
+                task.wait(0.06)
+                local ok2, e2 = pcall(function() VIM:SendTouchEvent(id, 1, x, y) end)
+                task.wait(0.06)
+                local ok3, e3 = pcall(function() VIM:SendTouchEvent(id, 2, x, y) end) -- always let go
+                L(string.format("SEND touch id=%d at (%d,%d) ok=%s/%s/%s%s", id, x, y, tostring(ok1), tostring(ok2), tostring(ok3),
+                    (ok1 and ok2 and ok3) and "" or (" ERR=" .. tostring(e1 or e2 or e3))))
             end
             local function mouseAt(x, y)
-                pcall(function()
+                lastSend, lastSendKind = tick(), "mouse"
+                local ok, e = pcall(function()
                     VIM:SendMouseMoveEvent(x, y, game)
                     task.wait(0.05)
                     VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
                     task.wait(0.1)
                     VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
                 end)
+                L(string.format("SEND mouse click at (%d,%d) ok=%s%s", x, y, tostring(ok), ok and "" or (" ERR=" .. tostring(e))))
             end
             -- tap the middle of a GUI object (re-read every time, because the buttons slide)
             local function tapObj(obj, useMouse, offset)
                 local c = obj.AbsolutePosition + obj.AbsoluteSize / 2 + offset
+                L(string.format("TAP %s via %s: object centre (%d,%d) offset (%d,%d)", obj.Name, useMouse and "mouse" or "touch", c.X, c.Y, offset.X, offset.Y))
                 if useMouse then mouseAt(c.X, c.Y) else touchAt(c.X, c.Y) end
+            end
+            local function keyX()
+                lastSend, lastSendKind = tick(), "key ButtonX"
+                local ok, e = pcall(function()
+                    VIM:SendKeyEvent(true, Enum.KeyCode.ButtonX, false, game)
+                    task.wait(0.05)
+                    VIM:SendKeyEvent(false, Enum.KeyCode.ButtonX, false, game)
+                end)
+                L("SEND key ButtonX ok=" .. tostring(ok) .. (ok and "" or (" ERR=" .. tostring(e))))
             end
 
             local function closeChatLikeGame()
-                pcall(function()
+                local ok, e = pcall(function()
                     local ev = game:GetService("ReplicatedStorage").Package.Events:FindFirstChild("CloseChat")
-                    if ev then ev:Fire() end
+                    if ev then
+                        ev:Fire()
+                        L("CloseChat event fired")
+                    else
+                        L("CloseChat event NOT FOUND")
+                    end
                 end)
+                if not ok then L("CloseChat ERROR " .. tostring(e)) end
             end
 
-            -- presses No (real input) until the Yes/No question goes away
+            -- presses No until the Yes/No question goes away: a real tap first, then (if that did not work, for example
+            -- while you are moving) the No button's own click. Only ever the No button, never Yes, never a remote.
             local function pressNo(chat, no, yes)
                 local offs = { insetOf(no), Vector2.zero, GuiService:GetGuiInset() }
                 local function gone()
@@ -15164,77 +15303,497 @@ if not REQUIRE_GAME_ID or game.PlaceId == GAME_ID then
                     return not (chat.Visible and o and o.Visible and no.Parent and no.Visible and no.AbsoluteSize.X > 0)
                 end
                 local function overYes(off)
+                    if typeof(yes) ~= "Instance" then return false end
                     local c = no.AbsolutePosition + no.AbsoluteSize / 2 + off
                     local yp, ys = yes.AbsolutePosition + off, yes.AbsoluteSize
                     return c.X >= yp.X and c.X <= yp.X + ys.X and c.Y >= yp.Y and c.Y <= yp.Y + ys.Y
                 end
-                for _, useMouse in ipairs({ false, true }) do
-                    for _, off in ipairs(offs) do
+                local function waitGone(t)
+                    local t0 = tick()
+                    while tick() - t0 < t do
                         if gone() then return true end
+                        task.wait(0.05)
+                    end
+                    return gone()
+                end
+                L("pressNo: start no=" .. typeof(no) .. " yes=" .. typeof(yes) .. " chat=" .. typeof(chat))
+                if typeof(no) ~= "Instance" then return false, "no button" end
+                pcall(function()
+                    L(string.format("pressNo: No at (%d,%d) size %dx%d", no.AbsolutePosition.X, no.AbsolutePosition.Y, no.AbsoluteSize.X, no.AbsoluteSize.Y))
+                    if typeof(yes) == "Instance" then
+                        L(string.format("pressNo: Yes at (%d,%d) size %dx%d", yes.AbsolutePosition.X, yes.AbsolutePosition.Y, yes.AbsoluteSize.X, yes.AbsoluteSize.Y))
+                    end
+                    L(string.format("pressNo: offsets (%d,%d) (%d,%d) (%d,%d)", offs[1].X, offs[1].Y, offs[2].X, offs[2].Y, offs[3].X, offs[3].Y))
+                end)
+                -- 1) real finger tap
+                if not overYes(offs[1]) then
+                    L("pressNo: step 1 = real finger tap")
+                    tapObj(no, false, offs[1])
+                    if waitGone(0.9) then return true, "tap" end
+                    L("pressNo: step 1 had no effect")
+                else
+                    L("pressNo: step 1 skipped (tap point would land on Yes)")
+                end
+                -- 2) the No button's own click (the same code the game runs for a tap)
+                if type(firesignal) == "function" then
+                    L("pressNo: step 2 = firesignal(No.MouseButton1Click)")
+                    local okF, eF = pcall(function() firesignal(no.MouseButton1Click) end)
+                    if not okF then L("pressNo: firesignal ERROR " .. tostring(eF)) end
+                    if waitGone(0.9) then return true, "click" end
+                    L("pressNo: step 2 had no effect")
+                else
+                    L("pressNo: step 2 skipped (firesignal missing)")
+                end
+                if type(getconnections) == "function" then
+                    local okC, cs = pcall(getconnections, no.MouseButton1Click)
+                    L("pressNo: step 2b = getconnections, connections found: " .. ((okC and type(cs) == "table") and tostring(#cs) or "ERR"))
+                    pcall(function()
+                        for _, c in ipairs(getconnections(no.MouseButton1Click)) do
+                            pcall(function() c:Fire() end)
+                        end
+                    end)
+                    if waitGone(0.9) then return true, "click" end
+                    L("pressNo: step 2b had no effect")
+                else
+                    L("pressNo: step 2b skipped (getconnections missing)")
+                end
+                -- 3) the other tap positions, finger then mouse
+                for _, useMouse in ipairs({ false, true }) do
+                    for oi, off in ipairs(offs) do
+                        if gone() then return true, "tap" end
                         if not overYes(off) then
+                            L(string.format("pressNo: step 3 = %s tap, offset #%d", useMouse and "mouse" or "touch", oi))
                             tapObj(no, useMouse, off)
-                            task.wait(0.5)
-                            if gone() then return true end
+                            if waitGone(0.9) then return true, "tap" end
+                        else
+                            L(string.format("pressNo: step 3 %s offset #%d skipped (would land on Yes)", useMouse and "mouse" or "touch", oi))
                         end
                     end
                 end
-                return gone()
+                return gone(), "none"
             end
 
             note("Auto Close NPC Dialog on")
             task.spawn(function()
-                local handled, advanceTaps, lastKey, stable = false, 0, nil, 0
-                while getgenv().AutoCloseDialogGen == gen do
-                    local ok, chat = pcall(activeChat)
-                    if not (ok and chat) then
+                local handled, advanceTaps, lastKey, stable, handledAt = false, 0, nil, 0, 0
+                -- every time the chat box opens or closes counts as a NEW dialogue, so the state can never get stuck
+                local session, seen, hooked, conn = 0, 0, nil, nil
+                local textConn, hookedText, lastTapAt, ignoredFor = nil, nil, 0, -1
+                local optConn, hookedOpts, inputConn = nil, nil, nil
+                local lastTxt, txtStable, typingDone = "", 0, true
+                local lastStateKey, lastBeat, lastWhy, gaveUpNoted = nil, 0, nil, false
+
+                local function hook()
+                    local c = chatFrame()
+                    if c and c ~= hooked then
+                        hooked = c
+                        if conn then conn:Disconnect() end
+                        conn = c:GetPropertyChangedSignal("Visible"):Connect(function()
+                            session = session + 1
+                            L("EVENT chat.Visible = " .. tostring(c.Visible) .. " (session " .. session .. ")")
+                        end)
+                        L("hooked chat frame: " .. c:GetFullName() .. " (Visible=" .. tostring(c.Visible) .. ")")
+                    end
+                    local tl = c and c:FindFirstChild("Text")
+                    if tl and tl ~= hookedText then
+                        hookedText = tl
+                        if textConn then textConn:Disconnect() end
+                        textConn = tl:GetPropertyChangedSignal("Text"):Connect(function()
+                            if #tl.Text <= 1 then
+                                -- a new line just started typing. The game only shows Yes/No AFTER typing is done,
+                                -- so anything still showing now is left over from the last dialogue.
+                                local o = c and c:FindFirstChild("Options")
+                                L(string.format("EVENT new line started typing (Text=%q). Options.Visible was %s -> hiding left-over Yes/No",
+                                    tl.Text, o and tostring(o.Visible) or "n/a"))
+                                if o then o.Visible = false end
+                                session = session + 1
+                            end
+                        end)
+                        L("hooked chat text label")
+                    end
+                    local of = c and c:FindFirstChild("Options")
+                    if of and of ~= hookedOpts then
+                        hookedOpts = of
+                        if optConn then optConn:Disconnect() end
+                        optConn = of:GetPropertyChangedSignal("Visible"):Connect(function()
+                            L("EVENT Options.Visible = " .. tostring(of.Visible))
+                        end)
+                        L("hooked Options frame (Visible=" .. tostring(of.Visible) .. ")")
+                    end
+                end
+
+                -- does the game even SEE our fake taps? (log every touch / click / X-button input while a dialogue is open)
+                inputConn = UIS.InputBegan:Connect(function(inp, gp)
+                    pcall(function()
+                        local t = inp.UserInputType
+                        if t == Enum.UserInputType.Touch or t == Enum.UserInputType.MouseButton1 or inp.KeyCode == Enum.KeyCode.ButtonX then
+                            local cf = chatFrame()
+                            if cf and cf.Visible then
+                                local ours = (tick() - lastSend) < 0.5
+                                L(string.format("INPUT seen by game: %s key=%s pos=(%d,%d) gameProcessed=%s  <- %s", tostring(t), tostring(inp.KeyCode),
+                                    inp.Position.X, inp.Position.Y, tostring(gp), ours and ("OURS (" .. lastSendKind .. ")") or "PLAYER/other"))
+                            end
+                        end
+                    end)
+                end)
+
+                local function step()
+                    pcall(hook)
+                    if seen ~= session then
+                        seen = session
+                        handled, advanceTaps, lastKey, stable, gaveUpNoted = false, 0, nil, 0, false
+                        L("session -> " .. session .. " (state reset: handled=false, taps=0)")
+                    end
+                    local ok, chat, isSmile, why = pcall(activeChat)
+                    if not ok then
+                        L("ERROR in activeChat: " .. tostring(chat))
+                        chat, why = nil, "error in activeChat"
+                    end
+                    if not chat then
                         handled, advanceTaps, lastKey, stable = false, 0, nil, 0
-                    elseif not handled then
+                        if why ~= lastWhy then
+                            lastWhy = why
+                            L("idle: " .. tostring(why))
+                        end
+                        -- tell the player WHY nothing happens when a dialogue is open but ignored
+                        pcall(function()
+                            local cf = chatFrame()
+                            if cf and cf.Visible and ignoredFor ~= session then
+                                ignoredFor = session
+                                local cn = cf:FindFirstChild("CharacterName")
+                                note("Ignoring dialogue from " .. tostring(cn and cn.Text or "?") .. " - turn on \"Also close other NPCs\"")
+                            end
+                        end)
+                        return
+                    end
+                    lastWhy = nil
+                    local who = ""
+                    pcall(function()
+                        local cn = chat:FindFirstChild("CharacterName")
+                        who = clean(cn and cn.Text or "")
+                    end)
+                    local canSkip = (who ~= "doctor") -- every NPC may be tapped through, except the Doctor
+
+                    -- state log: whenever something changed, plus every 2 seconds
+                    pcall(function()
+                        local full, key, txt = snapshot(chat)
+                        if txt ~= lastTxt then
+                            lastTxt, txtStable, typingDone = txt, 0, false
+                        else
+                            txtStable = txtStable + 1
+                            if txtStable == 3 and not typingDone then
+                                typingDone = true
+                                L('text stopped changing (typing finished or waiting for a tap): "' .. (txt:sub(1, 80):gsub("\n", " ")) .. '"')
+                            end
+                        end
+                        if key ~= lastStateKey or tick() - lastBeat > 2 then
+                            lastStateKey, lastBeat = key, tick()
+                            L(string.format("STATE %s | typingDone=%s handled=%s taps=%d stable=%d session=%d",
+                                full, tostring(typingDone), tostring(handled), advanceTaps, stable, session))
+                        end
+                    end)
+
+                    if not handled then
                         local okf, no, yes = pcall(findNo, chat)
+                        if not okf then L("ERROR in findNo: " .. tostring(no)) end
                         if okf and no then
                             -- step 2: wait until the buttons stop sliding (the game ignores clicks before that)
                             local key = tostring(no.AbsoluteSize.X) .. "x" .. tostring(no.AbsoluteSize.Y)
-                            if key == lastKey then stable = stable + 1 else stable, lastKey = 0, key end
+                            if key == lastKey then
+                                stable = stable + 1
+                            else
+                                stable, lastKey = 0, key
+                                L("Yes/No found, No button size " .. key .. " (waiting for it to stop sliding)" ..
+                                    (typingDone and "" or "  !! text is STILL CHANGING, these may be left-over buttons"))
+                            end
                             if stable >= 3 then
                                 handled = true
+                                local mine = session
+                                L("Yes/No stable -> pressing No (typingDone=" .. tostring(typingDone) .. ")")
                                 note("Pressing No")
-                                local pressed = false
-                                local okp = pcall(function() pressed = pressNo(chat, no, yes) end)
+                                local pressed, how = false, "none"
+                                local okp, errp = pcall(function() pressed, how = pressNo(chat, no, yes) end)
+                                if not okp then L("ERROR in pressNo: " .. tostring(errp)) end
+                                L("pressNo finished: pressed=" .. tostring(pressed) .. " how=" .. tostring(how))
+                                if okp and pressed then note("No pressed (" .. tostring(how) .. ")") end
                                 task.wait(0.7)
-                                if chat.Visible then
+                                if session == mine and chat.Visible then
                                     -- the goodbye line waits for a tap: give it one like a player would
+                                    L("chat still open after No -> tapping the goodbye line")
                                     tapObj(chat, false, insetOf(chat))
                                     task.wait(0.8)
                                 end
-                                if chat.Visible then
+                                if session == mine and chat.Visible then
                                     note("Closing chat the game's way")
                                     closeChatLikeGame()
                                 elseif okp and pressed then
                                     note("Closed")
                                 end
+                                L("after answering: chat.Visible=" .. tostring(chat.Visible) .. " session " .. tostring(session) .. " (was " .. tostring(mine) .. ")")
+                                handledAt = tick()
                             end
                         else
                             -- step 1 (typing, or waiting for a tap): tap the chat to skip / continue
                             lastKey, stable = nil, 0
-                            if advanceTaps < 8 then
+                            local optsF = chat:FindFirstChild("Options")
+                            if advanceTaps >= 12 and tick() - lastTapAt > 4 then
+                                advanceTaps = 6 -- never give up
+                                L("12 taps had no effect; trying again")
+                            end
+                            if canSkip and advanceTaps < 12 and not (optsF and optsF.Visible) then
                                 advanceTaps = advanceTaps + 1
+                                lastTapAt = tick()
+                                local before = #lastTxt
                                 if advanceTaps == 1 then note("Skipping first line") end
-                                tapObj(chat, advanceTaps % 3 == 0, insetOf(chat))
+                                L(string.format("advance tap #%d (who=%s, text length now %d, typingDone=%s)", advanceTaps, who, before, tostring(typingDone)))
+                                if advanceTaps % 4 == 0 then
+                                    -- the game also accepts the gamepad X button as "continue"
+                                    keyX()
+                                else
+                                    tapObj(chat, advanceTaps % 3 == 0, insetOf(chat))
+                                end
                                 task.wait(0.6)
+                                local tx2 = chat:FindFirstChild("Text")
+                                L(string.format("advance tap #%d result: text length %d -> %d, chat.Visible=%s", advanceTaps, before,
+                                    tx2 and #tx2.Text or -1, tostring(chat.Visible)))
+                            elseif not canSkip then
+                                if not gaveUpNoted then
+                                    gaveUpNoted = true
+                                    L("not tapping: who='" .. who .. "' is the Doctor (never skipped)")
+                                end
+                            elseif optsF and optsF.Visible then
+                                if not gaveUpNoted then
+                                    gaveUpNoted = true
+                                    L("not tapping: Options frame is visible but no 'No' button was found (see STATE buttons)")
+                                end
                             end
                         end
+                    elseif tick() - handledAt > 5 then
+                        -- still open long after we answered: close it the way the game does and get ready again
+                        L("watchdog: still open 5s after answering -> CloseChat and reset")
+                        closeChatLikeGame()
+                        handled, advanceTaps, lastKey, stable = false, 0, nil, 0
+                        handledAt = tick()
                     end
+                end
+
+                while getgenv().AutoCloseDialogGen == gen do
+                    local okS, errS = pcall(step)
+                    if not okS then L("LOOP ERROR (loop keeps running): " .. tostring(errS)) end
                     task.wait(0.15)
                 end
+                if conn then conn:Disconnect() end
+                if textConn then textConn:Disconnect() end
+                if optConn then optConn:Disconnect() end
+                if inputConn then inputConn:Disconnect() end
                 note("Auto Close NPC Dialog off")
             end)
         end,
     })
     FTab:CreateToggle({
-        Name = "Only Smile (quest NPC)",
-        CurrentValue = true,
-        Flag = "AutoCloseDialogOnlySmile",
+        Name = "Also close other NPCs' Yes/No (not just Smile)",
+        CurrentValue = false,
+        Flag = "AutoCloseDialogAll",
         Callback = function(Value)
-            getgenv().AutoCloseDialogOnlySmile = Value
+            getgenv().AutoCloseDialogAll = Value
+            local A = getgenv().HyzeAC
+            if A then pcall(A.log, "setting: 'Also close other NPCs' = " .. tostring(Value)) end
+        end,
+    })
+    FTab:CreateToggle({
+        Name = "AutoClose log on screen",
+        CurrentValue = false,
+        Flag = "AutoCloseLogOverlay",
+        Callback = function(Value)
+            local A = getgenv().HyzeAC
+            if not A then return end
+            A.overlay = Value
+            pcall(A.refresh)
+            if Value then pcall(A.log, "log overlay ON") end
+        end,
+    })
+    FTab:CreateButton({
+        Name = "Copy AutoClose log",
+        Callback = function()
+            local A = getgenv().HyzeAC
+            local clip = setclipboard or toclipboard
+            if A and clip then
+                pcall(clip, table.concat(A.lines, "\n"))
+                pcall(function() Library.Notify("info", "GameBug", "Log copied (" .. #A.lines .. " lines)") end)
+            else
+                pcall(function() Library.Notify("info", "GameBug", "No clipboard here - the log is in Hyze/autoclose_log.txt") end)
+            end
+        end,
+    })
+    FTab:CreateButton({
+        Name = "Clear AutoClose log",
+        Callback = function()
+            local A = getgenv().HyzeAC
+            if A then A.lines = {} end
+            pcall(function() if type(writefile) == "function" then writefile("Hyze/autoclose_log.txt", "") end end)
+            pcall(function() Library.Notify("info", "GameBug", "Log cleared") end)
+        end,
+    })
+
+    -- ===== Freeze Guard =====
+    -- A light safety net. When the game's memory gets high (or when you press "Lower graphics now") it lowers the load:
+    -- graphics quality 1, shadows off, post effects off, lighting reflections off, calm water, sky texture off, and it
+    -- switches off particles / trails / beams in small chunks (a few hundred objects per frame, so it can never freeze
+    -- the game by itself). Everything it changes is remembered, "Restore graphics" puts it all back.
+    -- It can NOT act during a freeze (nothing can); it only tries to make one less likely.
+    do
+        local Stats = game:GetService("Stats")
+        local Lighting = game:GetService("Lighting")
+        local G = {}
+        getgenv().HyzeGuard = G
+
+        function G.memory()
+            local ok, m = pcall(function() return Stats:GetTotalMemoryUsageMb() end)
+            return ok and m or 0
+        end
+
+        -- walks the world a few hundred objects per frame (never builds a giant list like GetDescendants does)
+        local function sweepParticles(s, myId)
+            local q, head, tail, processed, off = { workspace }, 1, 1, 0, 0
+            while head <= tail do
+                if G.sweepId ~= myId then return end -- cancelled (restore pressed or a newer sweep started)
+                local node = q[head]
+                q[head] = nil
+                head = head + 1
+                local ok, kids = pcall(function() return node:GetChildren() end)
+                if ok then
+                    for _, c in ipairs(kids) do
+                        if c:IsA("ParticleEmitter") or c:IsA("Trail") or c:IsA("Beam") then
+                            if c.Enabled then
+                                s.fx2[c] = true
+                                c.Enabled = false
+                                off = off + 1
+                            end
+                        end
+                        tail = tail + 1
+                        q[tail] = c
+                    end
+                end
+                processed = processed + 1
+                if processed % 300 == 0 then task.wait() end
+            end
+            pcall(function() Library.Notify("info", "Freeze Guard", "Particles/trails off: " .. off) end)
+        end
+
+        function G.reduce(why)
+            local s = getgenv().HyzeGuardSaved
+            if not s then
+                s = { fx = {}, fx2 = setmetatable({}, { __mode = "k" }), skies = {} }
+                getgenv().HyzeGuardSaved = s
+            end
+            pcall(function()
+                local r = settings().Rendering
+                if s.quality == nil then s.quality = r.QualityLevel end
+                r.QualityLevel = Enum.QualityLevel.Level01
+            end)
+            pcall(function()
+                if s.shadows == nil then s.shadows = Lighting.GlobalShadows end
+                Lighting.GlobalShadows = false
+            end)
+            pcall(function()
+                if s.diffuse == nil then s.diffuse = Lighting.EnvironmentDiffuseScale end
+                if s.specular == nil then s.specular = Lighting.EnvironmentSpecularScale end
+                Lighting.EnvironmentDiffuseScale = 0
+                Lighting.EnvironmentSpecularScale = 0
+            end)
+            pcall(function()
+                local t = workspace.Terrain
+                if s.water == nil then s.water = { t.WaterWaveSize, t.WaterWaveSpeed, t.WaterReflectance } end
+                t.WaterWaveSize = 0
+                t.WaterWaveSpeed = 0
+                t.WaterReflectance = 0
+            end)
+            local off = 0
+            local function sweep(container)
+                if not container then return end
+                for _, v in ipairs(container:GetChildren()) do
+                    if v:IsA("PostEffect") and v.Enabled then
+                        s.fx[v] = true
+                        v.Enabled = false
+                        off = off + 1
+                    elseif v:IsA("Sky") then
+                        s.skies[#s.skies + 1] = v
+                        v.Parent = nil -- kept, so Restore can put it back
+                    end
+                end
+            end
+            pcall(sweep, Lighting)
+            pcall(function() sweep(workspace.CurrentCamera) end)
+            pcall(function() Library.Notify("info", "Freeze Guard", tostring(why) .. ": graphics lowered (" .. off .. " effects off)") end)
+            G.sweepId = (G.sweepId or 0) + 1
+            task.spawn(sweepParticles, s, G.sweepId)
+        end
+
+        function G.restore()
+            G.sweepId = (G.sweepId or 0) + 1 -- cancels a sweep that is still running
+            local s = getgenv().HyzeGuardSaved
+            if not s then
+                pcall(function() Library.Notify("info", "Freeze Guard", "Nothing to restore") end)
+                return
+            end
+            pcall(function() if s.quality ~= nil then settings().Rendering.QualityLevel = s.quality end end)
+            pcall(function() if s.shadows ~= nil then Lighting.GlobalShadows = s.shadows end end)
+            pcall(function()
+                if s.diffuse ~= nil then Lighting.EnvironmentDiffuseScale = s.diffuse end
+                if s.specular ~= nil then Lighting.EnvironmentSpecularScale = s.specular end
+            end)
+            pcall(function()
+                if s.water then
+                    local t = workspace.Terrain
+                    t.WaterWaveSize, t.WaterWaveSpeed, t.WaterReflectance = s.water[1], s.water[2], s.water[3]
+                end
+            end)
+            for _, sky in ipairs(s.skies) do pcall(function() sky.Parent = Lighting end) end
+            for inst, was in pairs(s.fx) do pcall(function() inst.Enabled = was end) end
+            for inst in pairs(s.fx2) do pcall(function() inst.Enabled = true end) end
+            getgenv().HyzeGuardSaved = nil
+            pcall(function() Library.Notify("info", "Freeze Guard", "Graphics restored") end)
+        end
+    end
+    FTab:CreateToggle({
+        Name = "Freeze Guard (lower graphics when memory > 1200 MB)",
+        CurrentValue = false,
+        Flag = "FreezeGuard",
+        Callback = function(Value)
+            getgenv().HyzeGuardGen = (getgenv().HyzeGuardGen or 0) + 1
+            local gen = getgenv().HyzeGuardGen
+            if not Value then return end
+            local LIMIT_MB, COOLDOWN = 1200, 90
+            pcall(function() Library.Notify("info", "Freeze Guard", "On (limit " .. LIMIT_MB .. " MB)") end)
+            task.spawn(function()
+                local lastAct = 0
+                while getgenv().HyzeGuardGen == gen do
+                    task.wait(10)
+                    if getgenv().HyzeGuardGen ~= gen then break end
+                    local G = getgenv().HyzeGuard
+                    if G then
+                        local mem = G.memory()
+                        if mem > LIMIT_MB and tick() - lastAct > COOLDOWN then
+                            lastAct = tick()
+                            pcall(G.reduce, string.format("memory %.0f MB", mem))
+                        end
+                    end
+                end
+            end)
+        end,
+    })
+    FTab:CreateButton({
+        Name = "Lower graphics now",
+        Callback = function()
+            local G = getgenv().HyzeGuard
+            if G then G.reduce("manual") end
+        end,
+    })
+    FTab:CreateButton({
+        Name = "Restore graphics",
+        Callback = function()
+            local G = getgenv().HyzeGuard
+            if G then G.restore() end
         end,
     })
 
@@ -17673,6 +18232,110 @@ if not REQUIRE_GAME_ID or game.PlaceId == GAME_ID then
         Callback = function(Value)
             getgenv().HyzeDebugOn = Value
             if not Value then pcall(function() local g = (type(gethui) == "function" and gethui() or game:GetService("CoreGui")):FindFirstChild("HyzeDebug"); if g then g:Destroy() end end) end
+        end,
+    })
+
+    -- ===== Virtual phone fix: solid colors instead of UIGradient =====
+    -- The menu paints almost everything as a WHITE frame with a UIGradient on top (window body, switched-on toggles,
+    -- slider fills, accent bars, icons). Some virtual phones / cloud phones cannot draw UIGradient, so those parts
+    -- come out see-through or colorless. This switch gives every such part its middle gradient color as a plain
+    -- color and turns the gradient off. It also follows later changes (toggling a switch, changing the color theme).
+    -- Turning it off again puts the gradients back.
+    VTab:CreateSection("Virtual phone")
+    local solid = { on = false, conns = {}, items = {} }
+    local function solidColorAt(g, t)
+        local ks = g.Color.Keypoints
+        if #ks == 0 then return Color3.new(1, 1, 1) end
+        if t <= ks[1].Time then return ks[1].Value end
+        for i = 1, #ks - 1 do
+            local a, b = ks[i], ks[i + 1]
+            if t <= b.Time then
+                return a.Value:Lerp(b.Value, (t - a.Time) / math.max(b.Time - a.Time, 1e-6))
+            end
+        end
+        return ks[#ks].Value
+    end
+    local function solidProp(p)
+        if p:IsA("UIStroke") then return "Color" end
+        if p:IsA("TextLabel") or p:IsA("TextButton") or p:IsA("TextBox") then return "TextColor3" end
+        if p:IsA("ImageLabel") or p:IsA("ImageButton") then return "ImageColor3" end
+        return "BackgroundColor3"
+    end
+    local function solidHandle(g)
+        if not solid.on then return end
+        local p = g.Parent
+        if not (p and (p:IsA("GuiObject") or p:IsA("UIStroke"))) or solid.items[g] then return end
+        local prop = solidProp(p)
+        local item = { g = g, p = p, prop = prop, intent = g.Enabled, busy = false }
+        solid.items[g] = item
+        local function paint()
+            if item.busy or not solid.on then return end
+            item.busy = true
+            if item.intent then
+                pcall(function()
+                    p[prop] = solidColorAt(g, 0.5)
+                    g.Enabled = false
+                end)
+            end
+            item.busy = false
+        end
+        table.insert(solid.conns, g:GetPropertyChangedSignal("Enabled"):Connect(function()
+            if item.busy then return end
+            item.intent = g.Enabled -- what the menu wants: gradient on / off
+            paint()
+        end))
+        table.insert(solid.conns, g:GetPropertyChangedSignal("Color"):Connect(paint))
+        table.insert(solid.conns, p:GetPropertyChangedSignal(prop):Connect(function()
+            if item.busy or not item.intent then return end
+            if p[prop] == Color3.new(1, 1, 1) then paint() end -- the menu painted it white for the gradient
+        end))
+        paint()
+    end
+    local function solidSet(on, gui)
+        if on == solid.on then return end
+        solid.on = on
+        if on then
+            if not gui then solid.on = false return end
+            for _, d in ipairs(gui:GetDescendants()) do
+                if d:IsA("UIGradient") then solidHandle(d) end
+            end
+            table.insert(solid.conns, gui.DescendantAdded:Connect(function(d)
+                if d:IsA("UIGradient") then task.defer(solidHandle, d) end
+            end))
+        else
+            for _, c in ipairs(solid.conns) do c:Disconnect() end
+            solid.conns = {}
+            for _, it in pairs(solid.items) do
+                pcall(function()
+                    if it.g.Parent then
+                        if it.intent then it.p[it.prop] = Color3.new(1, 1, 1) end
+                        it.g.Enabled = it.intent
+                    end
+                end)
+            end
+            solid.items = {}
+        end
+    end
+    local function hubGui()
+        local g = (Win and Win.Gui) or (Window and Window.Gui)
+        if g and g.Parent then return g end
+        local roots = {}
+        if type(gethui) == "function" then pcall(function() roots[#roots + 1] = gethui() end) end
+        roots[#roots + 1] = game:GetService("CoreGui")
+        roots[#roots + 1] = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+        for _, root in ipairs(roots) do
+            for _, c in ipairs(root:GetChildren()) do
+                if c:IsA("ScreenGui") and c:FindFirstChild("HLMenu", true) then return c end
+            end
+        end
+        return nil
+    end
+    VTab:CreateToggle({
+        Name = "Solid colors (fix see-through window / colorless toggles)",
+        CurrentValue = false,
+        Callback = function(Value)
+            solidSet(Value, hubGui())
+            pcall(function() Library.Notify("info", "Hyze", Value and "Solid colors on" or "Solid colors off") end)
         end,
     })
 
